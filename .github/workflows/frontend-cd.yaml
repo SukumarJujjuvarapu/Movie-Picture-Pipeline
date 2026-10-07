@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Build Docker image
@@ -81,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -96,7 +96,6 @@ jobs:
         run: aws sts get-caller-identity
 
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push frontend image
@@ -129,3 +128,43 @@ jobs:
         run: |
           sed -i "s|image: frontend|image: $ECR_REPOSITORY:$IMAGE_TAG|" deployment.yaml
           kubectl kustomize . | kubectl apply -f -
+
+      - name: Wait for frontend rollout
+        run: |
+          kubectl rollout status deployment/frontend --timeout=180s
+
+      - name: Verify frontend pods
+        run: |
+          kubectl get pods
+          kubectl get service frontend
+
+      - name: Verify frontend application
+        run: |
+          echo "Waiting for frontend LoadBalancer..."
+
+          for i in {1..30}; do
+            FRONTEND_HOST=$(kubectl get service frontend \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+            if [ -n "$FRONTEND_HOST" ]; then
+              echo "Frontend URL: http://$FRONTEND_HOST"
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ -z "$FRONTEND_HOST" ]; then
+            echo "Frontend LoadBalancer hostname was not assigned."
+            exit 1
+          fi
+
+          echo "Testing frontend..."
+
+          curl --fail --retry 10 --retry-delay 5 \
+            "http://$FRONTEND_HOST/" \
+            -o frontend.html
+
+          grep -q "Movie List" frontend.html
+
+          echo "Frontend application is reachable."

@@ -113,14 +113,14 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.BACKEND_ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          docker build -t "$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REPOSITORY:$IMAGE_TAG"
 
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
-            --region ${{ secrets.AWS_REGION }} \
-            --name ${{ secrets.EKS_CLUSTER_NAME }}
+            --region "${{ secrets.AWS_REGION }}" \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}"
 
       - name: Verify EKS access
         run: kubectl get nodes
@@ -133,3 +133,59 @@ jobs:
         run: |
           sed -i "s|image: backend|image: $ECR_REPOSITORY:$IMAGE_TAG|" deployment.yaml
           kubectl kustomize . | kubectl apply -f -
+
+      - name: Wait for backend rollout
+        run: |
+          kubectl rollout status deployment/backend --timeout=180s
+
+      - name: Verify backend pods
+        run: |
+          kubectl get pods
+          kubectl get service backend
+
+      - name: Verify backend API
+        run: |
+          echo "Waiting for backend LoadBalancer..."
+
+          for i in {1..30}; do
+            BACKEND_HOST=$(kubectl get service backend \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+            if [ -n "$BACKEND_HOST" ]; then
+              echo "Backend URL: http://$BACKEND_HOST"
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ -z "$BACKEND_HOST" ]; then
+            echo "Backend LoadBalancer hostname was not assigned."
+            exit 1
+          fi
+
+          echo "Testing /movies..."
+
+          curl --fail --retry 10 --retry-delay 5 \
+            "http://$BACKEND_HOST/movies" \
+            -o backend-response.json
+
+          cat backend-response.json
+
+          python - <<'PY'
+          import json
+
+          with open("backend-response.json") as f:
+              data = json.load(f)
+
+          movies = data.get("movies")
+
+          if not isinstance(movies, list) or len(movies) == 0:
+              raise SystemExit(
+                  "Backend /movies did not return a non-empty movies list."
+              )
+
+          print(
+              f"Backend verification passed: {len(movies)} movies returned."
+          )
+          PY

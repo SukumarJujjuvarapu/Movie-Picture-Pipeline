@@ -1,0 +1,131 @@
+name: Frontend Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/frontend/**"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: starter/frontend
+        run: npm ci
+
+      - name: Run lint
+        working-directory: starter/frontend
+        run: npm run lint
+
+  test:
+    name: Frontend Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: starter/frontend
+        run: npm ci
+
+      - name: Run tests
+        working-directory: starter/frontend
+        run: npm test -- --watchAll=false
+        env:
+          CI: true
+
+  build:
+    name: Frontend Docker Build
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        working-directory: starter/frontend
+        run: |
+          docker build \
+            --build-arg REACT_APP_MOVIE_API_URL="${{ secrets.REACT_APP_MOVIE_API_URL }}" \
+            -t movie-picture-frontend:${{ github.sha }} .
+
+  deploy:
+    name: Deploy Frontend to EKS
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push frontend image
+        working-directory: starter/frontend
+        env:
+          ECR_REPOSITORY: ${{ secrets.FRONTEND_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+          MOVIE_API_URL: ${{ secrets.REACT_APP_MOVIE_API_URL }}
+        run: |
+          docker build \
+            --build-arg REACT_APP_MOVIE_API_URL="$MOVIE_API_URL" \
+            -t "$ECR_REPOSITORY:$IMAGE_TAG" .
+
+          docker push "$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "${{ secrets.AWS_REGION }}" \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}"
+
+      - name: Verify EKS access
+        run: kubectl get nodes
+
+      - name: Deploy frontend
+        working-directory: starter/frontend/k8s
+        env:
+          ECR_REPOSITORY: ${{ secrets.FRONTEND_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          sed -i "s|image: frontend|image: $ECR_REPOSITORY:$IMAGE_TAG|" deployment.yaml
+          kubectl kustomize . | kubectl apply -f -

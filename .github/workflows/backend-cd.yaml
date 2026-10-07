@@ -93,8 +93,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # CHANGE 1:
-      # Added AWS_SESSION_TOKEN because Udacity provides temporary AWS credentials.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -103,11 +101,12 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # CHANGE 2:
-      # Use the complete BACKEND_ECR_REPOSITORY secret directly.
       - name: Build and push backend image
         working-directory: starter/backend
         env:
@@ -123,11 +122,8 @@ jobs:
             --region ${{ secrets.AWS_REGION }} \
             --name ${{ secrets.EKS_CLUSTER_NAME }}
 
-      - name: Install Kustomize
-        run: |
-          curl -sLo kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_linux_amd64.tar.gz
-          tar -xzf kustomize.tar.gz
-          sudo mv kustomize /usr/local/bin/kustomize
+      - name: Verify EKS access
+        run: kubectl get nodes
 
       - name: Deploy backend to EKS
         working-directory: starter/backend/k8s
@@ -135,5 +131,5 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.BACKEND_ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          kustomize edit set image backend=$ECR_REPOSITORY:$IMAGE_TAG
-          kustomize build | kubectl apply -f -
+          sed -i "s|image: backend|image: $ECR_REPOSITORY:$IMAGE_TAG|" deployment.yaml
+          kubectl kustomize . | kubectl apply -f -

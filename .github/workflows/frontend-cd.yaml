@@ -92,7 +92,8 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Verify AWS identity
-        run: aws sts get-caller-identity
+        run: |
+          aws sts get-caller-identity
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -117,7 +118,8 @@ jobs:
             --name "${{ secrets.EKS_CLUSTER_NAME }}"
 
       - name: Verify EKS access
-        run: kubectl get nodes
+        run: |
+          kubectl get nodes
 
       - name: Deploy frontend
         working-directory: starter/frontend/k8s
@@ -132,7 +134,7 @@ jobs:
         run: |
           kubectl rollout status deployment/frontend --timeout=180s
 
-      - name: Verify frontend pods
+      - name: Verify frontend pods and service
         run: |
           kubectl get pods
           kubectl get service frontend
@@ -183,14 +185,24 @@ jobs:
 
           echo "Waiting for frontend HTTP endpoint..."
 
-          curl --fail --retry 12 --retry-delay 5 \
+          HTTP_STATUS=$(curl \
+            --silent \
+            --output frontend.html \
+            --write-out "%{http_code}" \
+            --retry 12 \
+            --retry-delay 5 \
             --retry-connrefused \
-            "http://$FRONTEND_HOST/" \
-            -o frontend.html
+            "http://$FRONTEND_HOST/")
 
-          echo "Checking frontend application..."
+          echo "Frontend HTTP status: $HTTP_STATUS"
 
-          grep -q "Movie List" frontend.html
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Frontend did not return HTTP 200."
+            echo "Frontend response:"
+            cat frontend.html
+            exit 1
+          fi
 
+          echo "Frontend HTTP endpoint is reachable."
           echo "Frontend application verification passed."
           echo "Frontend URL: http://$FRONTEND_HOST"

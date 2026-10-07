@@ -1,0 +1,139 @@
+name: Backend Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/backend/**"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Backend Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: backend-pip-${{ runner.os }}-${{ hashFiles('starter/backend/Pipfile.lock') }}
+
+      - name: Install Pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        working-directory: starter/backend
+        run: pipenv install --dev --deploy
+
+      - name: Run lint
+        working-directory: starter/backend
+        run: pipenv run lint
+
+  test:
+    name: Backend Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: backend-pip-${{ runner.os }}-${{ hashFiles('starter/backend/Pipfile.lock') }}
+
+      - name: Install Pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        working-directory: starter/backend
+        run: pipenv install --dev --deploy
+
+      - name: Run tests
+        working-directory: starter/backend
+        run: pipenv run test
+
+  build:
+    name: Backend Docker Build
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        working-directory: starter/backend
+        run: docker build -t movie-picture-backend:${{ github.sha }} .
+
+  deploy:
+    name: Deploy Backend to EKS
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # CHANGE 1:
+      # Added AWS_SESSION_TOKEN because Udacity provides temporary AWS credentials.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # CHANGE 2:
+      # Use the complete BACKEND_ECR_REPOSITORY secret directly.
+      - name: Build and push backend image
+        working-directory: starter/backend
+        env:
+          ECR_REPOSITORY: ${{ secrets.BACKEND_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+
+      - name: Install Kustomize
+        run: |
+          curl -sLo kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_linux_amd64.tar.gz
+          tar -xzf kustomize.tar.gz
+          sudo mv kustomize /usr/local/bin/kustomize
+
+      - name: Deploy backend to EKS
+        working-directory: starter/backend/k8s
+        env:
+          ECR_REPOSITORY: ${{ secrets.BACKEND_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          kustomize edit set image backend=$ECR_REPOSITORY:$IMAGE_TAG
+          kustomize build | kubectl apply -f -

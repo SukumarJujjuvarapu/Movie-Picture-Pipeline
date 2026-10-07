@@ -89,7 +89,6 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Verify AWS identity
@@ -142,7 +141,9 @@ jobs:
         run: |
           echo "Waiting for frontend LoadBalancer..."
 
-          for i in {1..30}; do
+          FRONTEND_HOST=""
+
+          for i in {1..60}; do
             FRONTEND_HOST=$(kubectl get service frontend \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 
@@ -151,6 +152,7 @@ jobs:
               break
             fi
 
+            echo "LoadBalancer hostname not ready yet. Attempt $i/60"
             sleep 10
           done
 
@@ -159,12 +161,36 @@ jobs:
             exit 1
           fi
 
-          echo "Testing frontend..."
+          echo "Waiting for DNS resolution..."
 
-          curl --fail --retry 10 --retry-delay 5 \
+          DNS_READY=false
+
+          for i in {1..60}; do
+            if getent hosts "$FRONTEND_HOST" > /dev/null 2>&1; then
+              echo "DNS is ready for $FRONTEND_HOST"
+              DNS_READY=true
+              break
+            fi
+
+            echo "DNS not ready yet. Attempt $i/60"
+            sleep 10
+          done
+
+          if [ "$DNS_READY" != "true" ]; then
+            echo "Frontend LoadBalancer hostname does not resolve."
+            exit 1
+          fi
+
+          echo "Waiting for frontend HTTP endpoint..."
+
+          curl --fail --retry 12 --retry-delay 5 \
+            --retry-connrefused \
             "http://$FRONTEND_HOST/" \
             -o frontend.html
 
+          echo "Checking frontend application..."
+
           grep -q "Movie List" frontend.html
 
-          echo "Frontend application is reachable."
+          echo "Frontend application verification passed."
+          echo "Frontend URL: http://$FRONTEND_HOST"
